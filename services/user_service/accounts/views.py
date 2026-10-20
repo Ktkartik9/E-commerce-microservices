@@ -8,6 +8,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from .models import User
 from rest_framework.pagination import PageNumberPagination
+from django.db import models
 
 
 
@@ -20,6 +21,7 @@ def health_check(request):
         "version": "1.0.0",
         "message": "User Service API is working!"
     })
+
 
 
 @api_view(["POST"])
@@ -48,7 +50,6 @@ def register_user(request):
 
 
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_profile(request):
@@ -63,8 +64,6 @@ def user_profile(request):
         "bio": user.bio,
         "location": user.location,
     })
-
-
 
 
 
@@ -135,11 +134,24 @@ def change_password(request):
 
 
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_list(request):
-    users = User.objects.all().order_by("id")
+
+    search = request.query_params.get("search", "").strip()
+    location = request.query_params.get("location", "").strip()
+
+    if location:
+        users = User.objects.all().order_by("id")
+        users = users.filter(location__icontains=location)
+
+    if search:
+        users = users.filter(
+            models.Q(username__icontains=search)
+            | models.Q(first_name__icontains=search)
+            | models.Q(last_name__icontains=search)
+            | models.Q(location__icontains=search)
+        )
 
     paginator = PageNumberPagination()
     paginator.page_size = 10
@@ -159,3 +171,17 @@ def user_list(request):
         })
 
     return paginator.get_paginated_response(data)
+
+
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_account(request):
+    user = request.user
+    user.delete()
+
+    return Response(
+        {"message": "Your account has been deleted successfully."},
+        status=status.HTTP_200_OK,
+    )
