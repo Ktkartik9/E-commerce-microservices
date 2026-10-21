@@ -1,14 +1,21 @@
 from rest_framework import generics
-from .models import Product
-from .serializers import ProductSerializer
+from .models import Product, Category
+from .serializers import ProductSerializer, CategorySerializer
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+
 
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
 
     def get_queryset(self):
-        queryset = Product.objects.filter(
-            is_active=True
-        ).order_by("-created_at")
+        queryset = Product.objects.filter(is_active=True).order_by("-created_at")
+
+        category_id = self.request.query_params.get("category")
+
+        if category_id:
+            queryset = queryset.filter(category_id=category_id)
 
         search = self.request.query_params.get("search", "").strip()
         min_price = self.request.query_params.get("min_price")
@@ -29,3 +36,49 @@ class ProductListCreateView(generics.ListCreateAPIView):
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
+
+
+
+class CategoryListCreateView(generics.ListCreateAPIView):
+    queryset = Category.objects.all().order_by("name")
+    serializer_class = CategorySerializer
+
+
+
+
+
+@api_view(["PATCH"])
+def update_product_stock(request, pk):
+    try:
+        product = Product.objects.get(pk=pk)
+    except Product.DoesNotExist:
+        return Response(
+            {"error": "Product not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    stock = request.data.get("stock")
+
+    if stock is None:
+        return Response(
+            {"error": "Stock is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if isinstance(stock, bool) or not isinstance(stock, int) or stock < 0:
+        return Response(
+            {"error": "Stock must be a non-negative integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    product.stock = stock
+    product.save(update_fields=["stock", "updated_at"])
+
+    return Response(
+        {
+            "message": "Stock updated successfully.",
+            "product_id": product.id,
+            "stock": product.stock,
+        },
+        status=status.HTTP_200_OK,
+    )
