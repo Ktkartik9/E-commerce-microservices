@@ -10,5 +10,5 @@ urlpatterns = [
     path("profile/update/", update_profile, name="update-profile"),
     path("change-password/", change_password, name="change-password"),
     path("list/", user_list, name="user-list"),
-    path("delete-account/", delete_account, name="delete-account"),
+    path("delete-account/", delete_account, name="delete-account"), 
 ]
