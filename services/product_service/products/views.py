@@ -4,6 +4,7 @@ from .serializers import ProductSerializer, CategorySerializer
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.db import transaction
 
 
 class ProductListCreateView(generics.ListCreateAPIView):
@@ -87,19 +88,6 @@ def update_product_stock(request, pk):
 
 @api_view(["POST"])
 def reserve_product_stock(request, pk):
-    try:
-        product = Product.objects.get(pk=pk)
-    except Product.DoesNotExist:
-        return Response(
-            {"error": "Product not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-
-    if not product.is_active:
-        return Response(
-            {"error": "Product is unavailable."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
 
     quantity = request.data.get("quantity")
 
@@ -109,24 +97,83 @@ def reserve_product_stock(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if quantity > product.stock:
-        return Response(
-            {
-                "error": "Insufficient stock.",
-                "available_stock": product.stock,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    try:
+        with transaction.atomic():
 
-    product.stock -= quantity
-    product.save(update_fields=["stock", "updated_at"])
+            product = Product.objects.select_for_update().get(pk=pk)
+
+            if not product.is_active:
+                return Response(
+                    {"error": "Product is unavailable."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if quantity > product.stock:
+                return Response(
+                    {
+                        "error": "Insufficient stock.",
+                        "available_stock": product.stock,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            product.stock -= quantity
+
+            product.save(update_fields=["stock", "updated_at"])
+
+            remaining_stock = product.stock
+
+    except Product.DoesNotExist:
+        return Response(
+            {"error": "Product not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
     return Response(
         {
             "message": "Stock reserved successfully.",
             "product_id": product.id,
             "reserved_quantity": quantity,
-            "remaining_stock": product.stock,
+            "remaining_stock": remaining_stock,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+
+
+@api_view(["POST"])
+def release_product_stock(request, pk):
+
+    quantity = request.data.get("quantity")
+
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+        return Response(
+            {"error": "Quantity must be a positive integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+            product = Product.objects.select_for_update().get(pk=pk)
+
+            product.stock += quantity
+            product.save(update_fields=["stock", "updated_at"])
+
+            remaining_stock = product.stock
+
+    except Product.DoesNotExist:
+        return Response(
+            {"error": "Product not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    return Response(
+        {
+            "message": "Stock released successfully.",
+            "product_id": product.id,
+            "released_quantity": quantity,
+            "remaining_stock": remaining_stock,
         },
         status=status.HTTP_200_OK,
     )

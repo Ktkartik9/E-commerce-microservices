@@ -1,12 +1,14 @@
 from itertools import product
-
+from django.db import transaction
 from rest_framework import generics, request
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view
 from .models import Order, OrderItem
 from .serializers import OrderSerializer, OrderItemSerializer
-from .product_client import get_product , reserve_stock
+from .product_client import get_product , reserve_stock , release_stock
+
+
 
 
 class OrderListCreateView(generics.ListCreateAPIView):
@@ -40,9 +42,9 @@ class OrderDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().destroy(request, *args, **kwargs)
 
 
+
 @api_view(["POST"])
 def add_order_item(request, pk):
-
     try:
         order = Order.objects.get(pk=pk)
     except Order.DoesNotExist:
@@ -50,6 +52,13 @@ def add_order_item(request, pk):
             {"error": "Order not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
+
+    if order.status in ["shipped", "delivered"]:
+        return Response(
+            {"error": "Cannot add items to a shipped or delivered order."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     product_id = request.data.get("product_id")
 
     if not product_id:
@@ -63,100 +72,128 @@ def add_order_item(request, pk):
     if product is None:
         return Response(
             {"error": "Product not found or Product Service is unavailable."},
-            status=status.HTTP_400_BAD_REQUEST,
+            status=status.HTTP_502_BAD_GATEWAY,
         )
 
     if not product.get("is_active"):
         return Response(
-        {"error": "This product is currently unavailable."},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
+            {"error": "This product is currently unavailable."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     quantity = request.data.get("quantity", 1)
+
+    if isinstance(quantity, bool):
+        return Response(
+            {"error": "Quantity must be a positive integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
         quantity = int(quantity)
     except (TypeError, ValueError):
         return Response(
-        {"error": "Quantity must be a valid integer."},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
+            {"error": "Quantity must be a valid integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if quantity < 1:
         return Response(
-        {"error": "Quantity must be at least 1."},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
+            {"error": "Quantity must be at least 1."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if quantity > product["stock"]:
         return Response(
-        {
-            "error": "Insufficient stock.",
-            "available_stock":product["stock"],
-        },
-        status=status.HTTP_400_BAD_REQUEST,
-    )
-
-    if order.status in ["shipped", "delivered"]:
-        return Response(
-        {"error": "Cannot add items to a shipped or delivered order."},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
-
-    product_id = request.data.get("product_id")
+            {
+                "error": "Insufficient stock.",
+                "available_stock": product["stock"],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if OrderItem.objects.filter(
         order=order,
         product_id=product_id,
-        ).exists(): 
+    ).exists():
         return Response(
-        {"error": "This product is already added to the order."},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
+            {"error": "This product is already added to the order."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     data = request.data.copy()
     data["price"] = product["price"]
 
     serializer = OrderItemSerializer(data=data)
-    
-    
 
-    if serializer.is_valid():
-        reservation = reserve_stock(product_id, quantity)
-
-        if reservation is None:
-            return Response(
-                {
-                    "error": "Could not reserve product stock.",
-                    "detail": "Product Service rejected the request or is unavailable.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if reservation.get("reserved_quantity") != quantity:
-            return Response(
-        {
-            "error": "Unexpected stock reservation response.",
-        },
-        status=status.HTTP_502_BAD_GATEWAY,
-        )
-        order_item = serializer.save(order=order)
-
-        order.total_amount = sum(
-            item.quantity * item.price
-            for item in order.items.all()
+    if not serializer.is_valid():
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-        order.save(update_fields=["total_amount", "updated_at"])
+    reservation = reserve_stock(product_id, quantity)
+
+    if not reservation["success"]:
+        error_status = reservation.get("status_code", 502)
+
+        if not 400 <= error_status <= 599:
+            error_status = status.HTTP_502_BAD_GATEWAY
 
         return Response(
-            serializer.data,
-            status=status.HTTP_201_CREATED,
+            {
+                "error": reservation["error"],
+                "details": reservation.get("details"),
+            },
+            status=error_status,
+        )
+
+    reservation_data = reservation["data"]
+
+    if reservation_data.get("reserved_quantity") != quantity:
+        return Response(
+            {"error": "Unexpected stock reservation response."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    try:
+        with transaction.atomic():
+            order_item = serializer.save(order=order)
+
+            order.total_amount = sum(
+                item.quantity * item.price
+                for item in order.items.all()
+            )
+
+            order.save(
+                update_fields=["total_amount", "updated_at"]
+            )
+
+    except Exception:
+        release_result = release_stock(product_id, quantity)
+
+        if release_result is None:
+            return Response(
+                {
+                    "error": "Order creation failed.",
+                    "detail": "Stock release could not be confirmed. Reconciliation may be required.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "error": "Order creation failed.",
+                "detail": "Stock release was successful.",
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST,
+        OrderItemSerializer(order_item).data,
+        status=status.HTTP_201_CREATED,
     )
+
 
 
 
