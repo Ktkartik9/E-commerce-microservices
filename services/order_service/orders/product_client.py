@@ -1,4 +1,5 @@
 import requests
+import uuid
 
 
 PRODUCT_SERVICE_URL = "http://127.0.0.1:8002/api/products/"
@@ -19,13 +20,20 @@ def get_product(product_id):
 
 
 
-def reserve_stock(product_id, quantity):
+
+def reserve_stock(product_id, quantity, reservation_id=None):
+    if reservation_id is None:
+        reservation_id = str(uuid.uuid4())
+
     url = f"{PRODUCT_SERVICE_URL}{product_id}/reserve-stock/"
 
     try:
         response = requests.post(
             url,
-            json={"quantity": quantity},
+            json={
+                "quantity": quantity,
+                "reservation_id": reservation_id,
+            },
             timeout=5,
         )
     except requests.RequestException:
@@ -33,6 +41,7 @@ def reserve_stock(product_id, quantity):
             "success": False,
             "error": "Product Service is unavailable.",
             "status_code": 503,
+            "reservation_id": reservation_id,
         }
 
     try:
@@ -44,6 +53,7 @@ def reserve_stock(product_id, quantity):
         return {
             "success": True,
             "data": data,
+            "reservation_id": reservation_id,
         }
 
     return {
@@ -51,17 +61,18 @@ def reserve_stock(product_id, quantity):
         "error": data.get("error", "Stock reservation failed."),
         "status_code": response.status_code,
         "details": data,
+        "reservation_id": reservation_id,
     }
 
 
 
-def release_stock(product_id, quantity):
+def release_stock(product_id, quantity, reservation_id):
     url = f"{PRODUCT_SERVICE_URL}{product_id}/release-stock/"
 
     try:
         response = requests.post(
             url,
-            json={"quantity": quantity},
+            json={"reservation_id": reservation_id},
             timeout=5,
         )
     except requests.RequestException:
@@ -71,7 +82,8 @@ def release_stock(product_id, quantity):
         return None
 
     try:
-        return response.json()
+        data = response.json()
     except ValueError:
         return None
 
+    return data

@@ -1,3 +1,4 @@
+import uuid
 from rest_framework import generics
 from .models import Product, Category
 from .serializers import ProductSerializer, CategorySerializer
@@ -5,6 +6,8 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.db import transaction
+from django.db import models  
+from .models import Product, Category, StockReservation
 
 
 class ProductListCreateView(generics.ListCreateAPIView):
@@ -86,10 +89,12 @@ def update_product_stock(request, pk):
 
 
 
+
+
 @api_view(["POST"])
 def reserve_product_stock(request, pk):
-
     quantity = request.data.get("quantity")
+    reservation_id = request.data.get("reservation_id")
 
     if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
         return Response(
@@ -98,9 +103,52 @@ def reserve_product_stock(request, pk):
         )
 
     try:
-        with transaction.atomic():
+        reservation_id = uuid.UUID(str(reservation_id))
+    except (ValueError, TypeError, AttributeError):
+        return Response(
+            {"error": "A valid reservation_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-            product = Product.objects.select_for_update().get(pk=pk)
+    with transaction.atomic():
+        existing = StockReservation.objects.filter(
+            reservation_id=reservation_id
+        ).first()
+
+        if existing:
+            if existing.product_id != pk or existing.quantity != quantity:
+                return Response(
+                    {"error": "Reservation ID was already used for a different request."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            return Response(
+                {
+                    "message": "Reservation already exists.",
+                    "product_id": existing.product_id,
+                    "reserved_quantity": existing.quantity,
+                    "reservation_id": str(existing.reservation_id),
+                    "released": existing.is_released,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        updated = Product.objects.filter(
+            pk=pk,
+            is_active=True,
+            stock__gte=quantity,
+        ).update(
+            stock=models.F("stock") - quantity
+        )
+
+        if updated == 0:
+            product = Product.objects.filter(pk=pk).first()
+
+            if product is None:
+                return Response(
+                    {"error": "Product not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             if not product.is_active:
                 return Response(
@@ -108,33 +156,30 @@ def reserve_product_stock(request, pk):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            if quantity > product.stock:
-                return Response(
-                    {
-                        "error": "Insufficient stock.",
-                        "available_stock": product.stock,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            return Response(
+                {
+                    "error": "Insufficient stock.",
+                    "available_stock": product.stock,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            product.stock -= quantity
-
-            product.save(update_fields=["stock", "updated_at"])
-
-            remaining_stock = product.stock
-
-    except Product.DoesNotExist:
-        return Response(
-            {"error": "Product not found."},
-            status=status.HTTP_404_NOT_FOUND,
+        reservation = StockReservation.objects.create(
+            product_id=pk,
+            reservation_id=reservation_id,
+            quantity=quantity,
         )
+
+        product = Product.objects.get(pk=pk)
 
     return Response(
         {
             "message": "Stock reserved successfully.",
             "product_id": product.id,
             "reserved_quantity": quantity,
-            "remaining_stock": remaining_stock,
+            "remaining_stock": product.stock,
+            "reservation_id": str(reservation.reservation_id),
+            "released": False,
         },
         status=status.HTTP_200_OK,
     )
@@ -142,38 +187,77 @@ def reserve_product_stock(request, pk):
 
 
 
+
 @api_view(["POST"])
 def release_product_stock(request, pk):
+    reservation_id = request.data.get("reservation_id")
 
-    quantity = request.data.get("quantity")
-
-    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+    if not reservation_id:
         return Response(
-            {"error": "Quantity must be a positive integer."},
+            {"error": "Reservation ID is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        with transaction.atomic():
-            product = Product.objects.select_for_update().get(pk=pk)
-
-            product.stock += quantity
-            product.save(update_fields=["stock", "updated_at"])
-
-            remaining_stock = product.stock
-
-    except Product.DoesNotExist:
+        reservation_id = uuid.UUID(str(reservation_id))
+    except (ValueError, TypeError, AttributeError):
         return Response(
-            {"error": "Product not found."},
-            status=status.HTTP_404_NOT_FOUND,
+            {"error": "A valid reservation ID is required."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
+    with transaction.atomic():
+        reservation = StockReservation.objects.filter(
+            reservation_id=reservation_id,
+            product_id=pk,
+        ).first()
+
+        if reservation is None:
+            return Response(
+                {"error": "Reservation not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if reservation.is_released:
+            return Response(
+                {
+                    "message": "Stock was already released.",
+                    "reservation_id": str(reservation.reservation_id),
+                    "released_quantity": reservation.quantity,
+                    "already_released": True,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        updated = StockReservation.objects.filter(
+            pk=reservation.pk,
+            is_released=False,
+        ).update(is_released=True)
+
+        if updated == 0:
+            return Response(
+                {
+                    "message": "Stock was already released.",
+                    "reservation_id": str(reservation.reservation_id),
+                    "already_released": True,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        Product.objects.filter(pk=pk).update(
+            stock=models.F("stock") + reservation.quantity
+        )
+
+        product = Product.objects.get(pk=pk)
 
     return Response(
         {
             "message": "Stock released successfully.",
             "product_id": product.id,
-            "released_quantity": quantity,
-            "remaining_stock": remaining_stock,
+            "released_quantity": reservation.quantity,
+            "remaining_stock": product.stock,
+            "reservation_id": str(reservation.reservation_id),
+            "already_released": False,
         },
         status=status.HTTP_200_OK,
     )

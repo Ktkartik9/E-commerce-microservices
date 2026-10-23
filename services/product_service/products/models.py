@@ -1,4 +1,5 @@
 from django.db import models
+import uuid 
 
 
 class Category(models.Model):
@@ -26,4 +27,20 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name 
+
+
+class StockReservation(models.Model):
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name="reservations",
+    )
+    reservation_id = models.UUIDField(unique=True)
+    quantity = models.PositiveIntegerField()
+    is_released = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return str(self.reservation_id)
+
 

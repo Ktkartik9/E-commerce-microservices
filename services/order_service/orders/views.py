@@ -1,3 +1,4 @@
+import uuid
 from itertools import product
 from django.db import transaction
 from rest_framework import generics, request
@@ -131,8 +132,17 @@ def add_order_item(request, pk):
             serializer.errors,
             status=status.HTTP_400_BAD_REQUEST,
         )
+    reservation_id = request.data.get("reservation_id")
 
-    reservation = reserve_stock(product_id, quantity)
+    if not reservation_id:
+        reservation_id = str(uuid.uuid4())
+
+    reservation = reserve_stock(
+        product_id,
+        quantity,
+        reservation_id=reservation_id,
+    )
+    
 
     if not reservation["success"]:
         error_status = reservation.get("status_code", 502)
@@ -148,13 +158,24 @@ def add_order_item(request, pk):
             status=error_status,
         )
 
+    
     reservation_data = reservation["data"]
+
+    if reservation_data.get("released") is True:
+        return Response(
+        {
+            "error": "This reservation has already been released.",
+            "detail": "Use a new reservation ID for a new order attempt.",
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
 
     if reservation_data.get("reserved_quantity") != quantity:
         return Response(
-            {"error": "Unexpected stock reservation response."},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+        {"error": "Unexpected stock reservation response."},
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
+
 
     try:
         with transaction.atomic():
@@ -170,7 +191,7 @@ def add_order_item(request, pk):
             )
 
     except Exception:
-        release_result = release_stock(product_id, quantity)
+        release_result = release_stock(product_id, quantity,reservation_id)
 
         if release_result is None:
             return Response(
