@@ -34,6 +34,7 @@ class OrderItem(models.Model):
         related_name="items",
     )
     product_id = models.IntegerField()
+    reservation_id = models.UUIDField(unique=True,)
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(
         max_digits=10,
@@ -42,3 +43,4 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"Order {self.order.id} - Product {self.product_id}"
+

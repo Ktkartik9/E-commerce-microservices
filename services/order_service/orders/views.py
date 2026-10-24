@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view
 from .models import Order, OrderItem
 from .serializers import OrderSerializer, OrderItemSerializer
-from .product_client import get_product , reserve_stock , release_stock
+from .product_client import get_product , reserve_stock , release_stock 
 
 
 
@@ -44,8 +44,10 @@ class OrderDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 
+
 @api_view(["POST"])
 def add_order_item(request, pk):
+    # 1. Find the order
     try:
         order = Order.objects.get(pk=pk)
     except Order.DoesNotExist:
@@ -54,12 +56,16 @@ def add_order_item(request, pk):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    if order.status in ["shipped", "delivered"]:
+    # 2. Check order status
+    if order.status in ["shipped", "delivered", "cancelled"]:
         return Response(
-            {"error": "Cannot add items to a shipped or delivered order."},
+            {
+                "error": "Cannot add items to this order in its current status."
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 3. Get product ID
     product_id = request.data.get("product_id")
 
     if not product_id:
@@ -68,11 +74,30 @@ def add_order_item(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    try:
+        product_id = int(product_id)
+    except (TypeError, ValueError):
+        return Response(
+            {"error": "Product ID must be a valid integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if product_id < 1:
+        return Response(
+            {"error": "Product ID must be a positive integer."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # 4. Get product from Product Service
     product = get_product(product_id)
 
     if product is None:
         return Response(
-            {"error": "Product not found or Product Service is unavailable."},
+            {
+                "error": (
+                    "Product not found or Product Service is unavailable."
+                )
+            },
             status=status.HTTP_502_BAD_GATEWAY,
         )
 
@@ -82,6 +107,7 @@ def add_order_item(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 5. Validate quantity
     quantity = request.data.get("quantity", 1)
 
     if isinstance(quantity, bool):
@@ -113,6 +139,7 @@ def add_order_item(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 6. Prevent adding the same product twice to this order
     if OrderItem.objects.filter(
         order=order,
         product_id=product_id,
@@ -122,7 +149,10 @@ def add_order_item(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 7. Prepare serializer data
     data = request.data.copy()
+    data["product_id"] = product_id
+    data["quantity"] = quantity
     data["price"] = product["price"]
 
     serializer = OrderItemSerializer(data=data)
@@ -132,17 +162,27 @@ def add_order_item(request, pk):
             serializer.errors,
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    # 8. Get or generate reservation ID
     reservation_id = request.data.get("reservation_id")
 
     if not reservation_id:
         reservation_id = str(uuid.uuid4())
 
+    try:
+        reservation_id = str(uuid.UUID(str(reservation_id)))
+    except (ValueError, TypeError, AttributeError):
+        return Response(
+            {"error": "Reservation ID must be a valid UUID."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # 9. Reserve stock in Product Service
     reservation = reserve_stock(
         product_id,
         quantity,
         reservation_id=reservation_id,
     )
-    
 
     if not reservation["success"]:
         error_status = reservation.get("status_code", 502)
@@ -152,34 +192,71 @@ def add_order_item(request, pk):
 
         return Response(
             {
-                "error": reservation["error"],
+                "error": reservation.get(
+                    "error", "Stock reservation failed."
+                ),
                 "details": reservation.get("details"),
             },
             status=error_status,
         )
 
-    
     reservation_data = reservation["data"]
+
+    # 10. Validate reservation response
+    if reservation_data.get("product_id") != product_id:
+        return Response(
+            {
+                "error": (
+                    "Reservation product does not match "
+                    "the requested product."
+                )
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     if reservation_data.get("released") is True:
         return Response(
-        {
-            "error": "This reservation has already been released.",
-            "detail": "Use a new reservation ID for a new order attempt.",
-        },
-        status=status.HTTP_409_CONFLICT,
-    )
+            {
+                "error": "This reservation has already been released.",
+                "detail": "Use a new reservation ID for a new attempt.",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     if reservation_data.get("reserved_quantity") != quantity:
         return Response(
-        {"error": "Unexpected stock reservation response."},
-        status=status.HTTP_502_BAD_GATEWAY,
-    )
+            {"error": "Unexpected stock reservation response."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
 
+    # 11. Handle a repeated request using the same reservation ID
+    existing_item = OrderItem.objects.filter(
+        reservation_id=reservation_id
+    ).first()
 
+    if existing_item:
+        if (
+            existing_item.order_id == order.id
+            and existing_item.product_id == product_id
+            and existing_item.quantity == quantity
+        ):
+            return Response(
+                OrderItemSerializer(existing_item).data,
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {"error": "This reservation has already been used."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # 12. Create order item and update order total
     try:
         with transaction.atomic():
-            order_item = serializer.save(order=order)
+            order_item = serializer.save(
+                order=order,
+                reservation_id=reservation_id,
+            )
 
             order.total_amount = sum(
                 item.quantity * item.price
@@ -191,13 +268,24 @@ def add_order_item(request, pk):
             )
 
     except Exception:
-        release_result = release_stock(product_id, quantity,reservation_id)
+        # Compensate by releasing the reserved stock
+        try:
+            release_result = release_stock(
+                product_id,
+                quantity,
+                reservation_id,
+            )
+        except Exception:
+            release_result = None
 
         if release_result is None:
             return Response(
                 {
                     "error": "Order creation failed.",
-                    "detail": "Stock release could not be confirmed. Reconciliation may be required.",
+                    "detail": (
+                        "Stock release could not be confirmed. "
+                        "Reconciliation may be required."
+                    ),
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
@@ -210,6 +298,7 @@ def add_order_item(request, pk):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+    # 13. Return the created item
     return Response(
         OrderItemSerializer(order_item).data,
         status=status.HTTP_201_CREATED,
@@ -283,8 +372,10 @@ def update_order_status(request, pk):
     )
 
 
+
 @api_view(["POST"])
 def cancel_order(request, pk):
+    # 1. Find the order
     try:
         order = Order.objects.get(pk=pk)
     except Order.DoesNotExist:
@@ -293,18 +384,47 @@ def cancel_order(request, pk):
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    # 2. Check whether cancellation is allowed
     if order.status in ["shipped", "delivered"]:
         return Response(
             {"error": "This order cannot be cancelled."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 3. Handle repeated cancellation
     if order.status == "cancelled":
         return Response(
             {"message": "Order is already cancelled."},
             status=status.HTTP_200_OK,
         )
 
+    # 4. Release reserved stock for every order item
+    items = list(order.items.all())
+
+    for item in items:
+        try:
+            release_result = release_stock(
+                item.product_id,
+                item.quantity,
+                str(item.reservation_id),
+            )
+        except Exception:
+            release_result = None
+
+        if release_result is None:
+            return Response(
+                {
+                    "error": "Order cancellation could not be completed.",
+                    "detail": (
+                        "Stock release could not be confirmed. "
+                        "The order has not been marked as cancelled."
+                    ),
+                    "order_id": order.id,
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+    # 5. Mark order as cancelled only after stock releases succeed
     order.status = "cancelled"
     order.save(update_fields=["status", "updated_at"])
 
