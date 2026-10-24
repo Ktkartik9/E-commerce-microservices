@@ -17,12 +17,12 @@ class InventoryListCreateView(generics.ListCreateAPIView):
     permission_classes = [AllowAny]
 
 
+
 class InventoryDetailView(generics.RetrieveAPIView):
     queryset = Inventory.objects.all()
     serializer_class = InventorySerializer
     permission_classes = [AllowAny]
     lookup_field = "product_id"
-
 
 
 
@@ -102,6 +102,7 @@ def reserve_stock(request, product_id):
             },
             status=status.HTTP_201_CREATED,
         )
+
 
 
 @api_view(["POST"])

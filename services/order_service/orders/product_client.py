@@ -3,6 +3,7 @@ import uuid
 
 
 PRODUCT_SERVICE_URL = "http://127.0.0.1:8002/api/products/"
+INVENTORY_SERVICE_URL = "http://127.0.0.1:8004/api/inventory"
 
 
 def get_product(product_id):
@@ -23,67 +24,72 @@ def get_product(product_id):
 
 def reserve_stock(product_id, quantity, reservation_id=None):
     if reservation_id is None:
-        reservation_id = str(uuid.uuid4())
+        reservation_id = uuid.uuid4()
 
-    url = f"{PRODUCT_SERVICE_URL}{product_id}/reserve-stock/"
+    url = f"{INVENTORY_SERVICE_URL}/{product_id}/reserve/"
+
+    payload = {
+        "quantity": quantity,
+        "reservation_id": str(reservation_id),
+    }
 
     try:
         response = requests.post(
             url,
-            json={
-                "quantity": quantity,
-                "reservation_id": reservation_id,
-            },
+            json=payload,
             timeout=5,
         )
-    except requests.RequestException:
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        if response.status_code in [200, 201]:
+            return {
+                "success": True,
+                "data": data,
+                "reservation_id": str(reservation_id),
+                "status_code": response.status_code,
+            }
+
         return {
             "success": False,
-            "error": "Product Service is unavailable.",
-            "status_code": 503,
-            "reservation_id": reservation_id,
-        }
-
-    try:
-        data = response.json()
-    except ValueError:
-        data = {"error": "Invalid response from Product Service."}
-
-    if response.status_code == 200:
-        return {
-            "success": True,
             "data": data,
-            "reservation_id": reservation_id,
+            "reservation_id": str(reservation_id),
+            "status_code": response.status_code,
+            "details": data,
         }
 
-    return {
-        "success": False,
-        "error": data.get("error", "Stock reservation failed."),
-        "status_code": response.status_code,
-        "details": data,
-        "reservation_id": reservation_id,
-    }
+    except requests.RequestException as exc:
+        return {
+            "success": False,
+            "data": {},
+            "reservation_id": str(reservation_id),
+            "status_code": None,
+            "details": str(exc),
+        }
 
 
 
 def release_stock(product_id, quantity, reservation_id):
-    url = f"{PRODUCT_SERVICE_URL}{product_id}/release-stock/"
+    url = f"{INVENTORY_SERVICE_URL}/{product_id}/release/"
+
+    payload = {
+        "reservation_id": str(reservation_id),
+    }
 
     try:
         response = requests.post(
             url,
-            json={"reservation_id": reservation_id},
+            json=payload,
             timeout=5,
         )
+
+        if response.status_code == 200:
+            return response.json()
+
+        return None
+
     except requests.RequestException:
         return None
-
-    if response.status_code != 200:
-        return None
-
-    try:
-        data = response.json()
-    except ValueError:
-        return None
-
-    return data
