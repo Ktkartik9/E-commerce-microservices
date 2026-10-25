@@ -8,7 +8,7 @@ from rest_framework.decorators import api_view
 from .models import Order, OrderItem
 from .serializers import OrderSerializer, OrderItemSerializer
 from .product_client import get_product , reserve_stock , release_stock 
-
+from .payment_client import process_payment
 
 
 
@@ -306,8 +306,6 @@ def add_order_item(request, pk):
 
 
 
-
-
 @api_view(["PATCH"])
 def update_order_status(request, pk):
     try:
@@ -467,3 +465,80 @@ def get_queryset(self):
         queryset = queryset.filter(user_id=user_id)
 
     return queryset
+
+
+
+
+@api_view(["POST"])
+def pay_for_order(request, pk):
+    # 1. Find the order
+    try:
+        order = Order.objects.get(pk=pk)
+    except Order.DoesNotExist:
+        return Response(
+            {"error": "Order not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # 2. Allow payment only for pending orders
+    if order.status == "confirmed":
+        return Response(
+            {"message": "Order is already confirmed.", "order_id": order.id},
+            status=status.HTTP_200_OK,
+        )
+
+    if order.status != "pending":
+        return Response(
+            {
+                "error": "Payment is not allowed for this order status.",
+                "status": order.status,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # 3. Ensure the order contains items
+    if not order.items.exists():
+        return Response(
+            {"error": "Cannot pay for an order without items."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # 4. Create a stable idempotency key for this order
+    payment_key = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"order-flow-payment-{order.id}",
+    )
+
+    # 5. Call Payment Service
+    payment_result = process_payment(
+        order_id=order.id,
+        amount=order.total_amount,
+        idempotency_key=payment_key,
+    )
+
+    if not payment_result["success"]:
+        return Response(
+            {
+                "error": "Payment failed or Payment Service is unavailable.",
+                "payment_status_code": payment_result["status_code"],
+                "details": payment_result["data"],
+                "order_id": order.id,
+                "order_status": order.status,
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    # 6. Confirm the order after successful payment
+    order.status = "confirmed"
+    order.save(update_fields=["status", "updated_at"])
+
+    return Response(
+        {
+            "message": "Payment successful. Order confirmed.",
+            "order_id": order.id,
+            "amount": str(order.total_amount),
+            "order_status": order.status,
+            "payment": payment_result["data"],
+        },
+        status=status.HTTP_200_OK,
+    )

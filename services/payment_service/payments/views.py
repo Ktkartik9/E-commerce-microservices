@@ -1,9 +1,7 @@
 from decimal import Decimal, InvalidOperation
-
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-
 from .models import Payment
 from .serializers import PaymentSerializer
 
@@ -56,21 +54,36 @@ def process_payment(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    
+    existing = Payment.objects.filter(
+    idempotency_key=idempotency_key
+    ).first()
+
+    
     existing = Payment.objects.filter(
         idempotency_key=idempotency_key
     ).first()
 
-    if existing:
+    if existing is not None:
         if existing.order_id != order_id or existing.amount != amount:
             return Response(
                 {"error": "Idempotency key already used with different data."},
                 status=status.HTTP_409_CONFLICT,
             )
 
+        if existing.status == "success":
+            response_status = status.HTTP_200_OK
+        elif existing.status == "failed":
+            response_status = status.HTTP_402_PAYMENT_REQUIRED
+        else:
+            response_status = status.HTTP_200_OK
+
         return Response(
             PaymentSerializer(existing).data,
-            status=status.HTTP_200_OK,
+            status=response_status,
         )
+
+
 
     payment = Payment.objects.create(
         order_id=order_id,
