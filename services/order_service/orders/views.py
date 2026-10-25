@@ -481,11 +481,15 @@ def pay_for_order(request, pk):
         )
 
     # 2. Allow payment only for pending orders
-    if order.status == "confirmed":
+    if order.status == "cancelled":
         return Response(
-            {"message": "Order is already confirmed.", "order_id": order.id},
-            status=status.HTTP_200_OK,
-        )
+        {
+            "error": "Cancelled orders cannot be paid.",
+            "order_id": order.id,
+            "order_status": order.status,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
     if order.status != "pending":
         return Response(
@@ -516,17 +520,31 @@ def pay_for_order(request, pk):
         idempotency_key=payment_key,
     )
 
+    
     if not payment_result["success"]:
-        return Response(
+        payment_status_code = payment_result["status_code"]
+
+        if payment_status_code == 402:
+            return Response(
             {
-                "error": "Payment failed or Payment Service is unavailable.",
-                "payment_status_code": payment_result["status_code"],
-                "details": payment_result["data"],
+                "error": "Payment was declined.",
+                "payment": payment_result["data"],
                 "order_id": order.id,
                 "order_status": order.status,
             },
-            status=status.HTTP_502_BAD_GATEWAY,
+            status=status.HTTP_402_PAYMENT_REQUIRED,
         )
+
+        return Response(
+        {
+            "error": "Payment Service is unavailable or returned an error.",
+            "details": payment_result["data"],
+            "order_id": order.id,
+            "order_status": order.status,
+        },
+        status=status.HTTP_502_BAD_GATEWAY,
+        )
+
 
     # 6. Confirm the order after successful payment
     order.status = "confirmed"
@@ -542,3 +560,5 @@ def pay_for_order(request, pk):
         },
         status=status.HTTP_200_OK,
     )
+
+
