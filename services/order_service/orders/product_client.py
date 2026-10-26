@@ -2,8 +2,18 @@ import requests
 import uuid
 
 
-PRODUCT_SERVICE_URL = "http://127.0.0.1:8002/api/products/"
-INVENTORY_SERVICE_URL = "http://127.0.0.1:8004/api/inventory"
+import os
+
+PRODUCT_SERVICE_URL = os.getenv(
+    "PRODUCT_SERVICE_URL",
+    "http://127.0.0.1:8002/api/products",
+)
+
+INVENTORY_SERVICE_URL = os.getenv(
+    "INVENTORY_SERVICE_URL",
+    "http://127.0.0.1:8004/api/inventory",
+)
+
 
 
 def get_product(product_id):

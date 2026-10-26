@@ -2,7 +2,13 @@
 import uuid
 import requests
 
-PAYMENT_SERVICE_URL = "http://127.0.0.1:8005/api/payments"
+import os
+
+PAYMENT_SERVICE_URL = os.getenv(
+    "PAYMENT_SERVICE_URL",
+    "http://127.0.0.1:8005/api/payments",
+)
+
 
 
 def process_payment(order_id, amount, idempotency_key=None):
