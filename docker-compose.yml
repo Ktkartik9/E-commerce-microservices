@@ -53,3 +53,21 @@ services:
 
 
 
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      USER_SERVICE_URL: "http://user_service:8001"
+      ORDER_SERVICE_URL: "http://order_service:8003"
+      PRODUCT_SERVICE_URL: "http://product_service:8002"
+      INVENTORY_SERVICE_URL: "http://inventory_service:8004"
+      PAYMENT_SERVICE_URL: "http://payment_service:8005"
+    depends_on:
+      - user_service
+      - order_service
+      - product_service
+      - inventory_service
+      - payment_service
