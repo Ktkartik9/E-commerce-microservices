@@ -25,7 +25,7 @@ def proxy_request(request, service, path=""):
             status=404,
         )
 
-    target_url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    target_url = f"{base_url.rstrip('/')}{request.path}"
 
     headers = {
         key: value
@@ -58,11 +58,16 @@ def proxy_request(request, service, path=""):
         }
 
         return HttpResponse(
-            response.content,
-            status=response.status_code,
-            content_type=response.headers.get("Content-Type"),
-            headers=response_headers,
-        )
+        response.content,
+        status=response.status_code,
+        headers={
+        key: value
+        for key, value in response_headers.items()
+        if key.lower() != "content-type"
+    },
+    content_type=response.headers.get("Content-Type"),
+    )
+        
 
     except requests.RequestException:
         return JsonResponse(
