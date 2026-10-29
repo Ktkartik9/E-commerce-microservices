@@ -30,8 +30,15 @@ def proxy_request(request, service, path=""):
     headers = {
         key: value
         for key, value in request.headers.items()
-        if key.lower() not in ("host", "content-length", "connection")
+        if key.lower() not in (
+            "host",
+            "content-length",
+            "connection",
+        )
     }
+
+    # Use a valid hostname accepted by the microservice.
+    headers["Host"] = "localhost"
 
     try:
         response = requests.request(
@@ -57,17 +64,21 @@ def proxy_request(request, service, path=""):
             if key.lower() not in excluded_headers
         }
 
+        # Content-Type is passed separately to HttpResponse.
+        content_type = response.headers.get("Content-Type")
+
+        response_headers = {
+            key: value
+            for key, value in response_headers.items()
+            if key.lower() != "content-type"
+        }
+
         return HttpResponse(
-        response.content,
-        status=response.status_code,
-        headers={
-        key: value
-        for key, value in response_headers.items()
-        if key.lower() != "content-type"
-    },
-    content_type=response.headers.get("Content-Type"),
-    )
-        
+            response.content,
+            status=response.status_code,
+            headers=response_headers,
+            content_type=content_type,
+        )
 
     except requests.RequestException:
         return JsonResponse(
