@@ -37,7 +37,6 @@ def proxy_request(request, service, path=""):
         )
     }
 
-    # Use a valid hostname accepted by the microservice.
     headers["Host"] = "localhost"
 
     try:
@@ -64,7 +63,6 @@ def proxy_request(request, service, path=""):
             if key.lower() not in excluded_headers
         }
 
-        # Content-Type is passed separately to HttpResponse.
         content_type = response.headers.get("Content-Type")
 
         response_headers = {
